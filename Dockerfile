@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 WORKDIR /app
 ENV POSTGRES_SCHEMA_NAME=public
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     texlive-full \
     texlive-latex-extra \

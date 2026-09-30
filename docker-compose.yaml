@@ -4,11 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    runtime: nvidia
-    devices:
-      - /dev/nvidia0
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_VISIBLE_DEVICES=all
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=flow_db
@@ -29,7 +26,7 @@ services:
     depends_on:
       - postgres
   postgres:
-    image: postgres:latest
+    image: postgres:16
     networks:
       - flownet
     volumes:

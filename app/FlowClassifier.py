@@ -1,4 +1,4 @@
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.metrics import precision_recall_fscore_support
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score
@@ -67,9 +67,9 @@ class FlowClassifier:
             print("Error: Number of samples in X_payload_test and y_payload_test do not match. Exiting ...")
             return
         if self.class_type == 'binary':
-            flow_labels = list(y_flow_train.tolist() + y_flow_test.tolist())
+            flow_labels = list(y_flow_train.tolist() + y_flow_test.tolist()) + ['Unknown']
             print("np.unique(flow_labels): ", np.unique(flow_labels))
-            payload_labels = list(y_payload_train.tolist() + y_payload_test.tolist())
+            payload_labels = list(y_payload_train.tolist() + y_payload_test.tolist()) + ['Unknown']
             print("np.unique(payload_labels): ", np.unique(payload_labels))
             encoder_flow = LabelEncoder()
             encoder_flow.fit(flow_labels)
@@ -79,10 +79,11 @@ class FlowClassifier:
             encoder_payload.fit(payload_labels)
             y_payload_train = encoder_payload.transform(y_payload_train)
             y_payload_test = encoder_payload.transform(y_payload_test)
+            self.unknown_id = encoder_flow.transform(['Unknown'])[0]
         elif self.class_type == 'multiclass':
-            flow_labels = list(y_flow_train.tolist() + y_flow_test.tolist())
+            flow_labels = list(y_flow_train.tolist() + y_flow_test.tolist()) + ['Unknown']
             print("np.unique(flow_labels): ", np.unique(flow_labels))
-            payload_labels = list(y_payload_train.tolist() + y_payload_test.tolist())
+            payload_labels = list(y_payload_train.tolist() + y_payload_test.tolist()) + ['Unknown']
             print("np.unique(payload_labels): ", np.unique(payload_labels))
             encoder_flow = LabelEncoder()
             encoder_flow.fit(flow_labels)
@@ -92,22 +93,35 @@ class FlowClassifier:
             y_flow_test = encoder_flow.transform(y_flow_test)
             y_payload_train = encoder_payload.transform(y_payload_train)
             y_payload_test = encoder_payload.transform(y_payload_test)
+            self.unknown_id = encoder_flow.transform(['Unknown'])[0]
         else:
             print("Uknown class type. Exiting ...")
             return
         # Training phase
         payload_model.fit(X_payload_train, y_payload_train)
         flow_model.fit(X_flow_train, y_flow_train)
+        
+        print("Training Isolation Forests for Anomaly Detection...")
+        self.flow_anomaly_model = IsolationForest(random_state=42)
+        self.payload_anomaly_model = IsolationForest(random_state=42)
+        self.flow_anomaly_model.fit(X_flow_train)
+        self.payload_anomaly_model.fit(X_payload_train)
+
         joblib.dump(payload_model, filename + "_payload.joblib", compress=3)
         joblib.dump(flow_model, filename + "_flow.joblib", compress=3)
+        joblib.dump(self.payload_anomaly_model, filename + "_payload_anomaly.joblib", compress=3)
+        joblib.dump(self.flow_anomaly_model, filename + "_flow_anomaly.joblib", compress=3)
         print("=== Models Saved at: ", filename + "_payload.joblib", " ", filename + "_flow.joblib", " ===")
         # Testing phase
         payload_model = joblib.load(filename + "_payload.joblib")
         flow_model = joblib.load(filename + "_flow.joblib")
+        self.payload_anomaly_model = joblib.load(filename + "_payload_anomaly.joblib")
+        self.flow_anomaly_model = joblib.load(filename + "_flow_anomaly.joblib")
         if dataset=='unsw':
             if self.protocol == 'tcp' or self.protocol == 'udp':
                 if self.class_type == 'binary':
                     _, binary_class_dict = self.data_manager.get_unsw_binary_class_labels(df=df)
+                    binary_class_dict[self.unknown_id] = 'Unknown/Zero-Day'
                     filename = str(dataset) + "_" + str(self.protocol) + "_" + "_binary_model"
                     filename = os.path.join('/app/results/', filename)
                     for key, value in binary_class_dict.items():
@@ -124,6 +138,7 @@ class FlowClassifier:
                     filename = str(dataset) + "_" + str(self.protocol) + "_multiclass_model"
                     filename = os.path.join('/app/results/', filename)
                     _, multiclass_dict = self.data_manager.get_unsw_multi_class_labels(df=df)
+                    multiclass_dict[self.unknown_id] = 'Unknown/Zero-Day'
                     for key, value in multiclass_dict.items():
                         print("Traffic class ", value, " --> ", key)
                     print("Plotting Ensemble-NIDS Multiclass ROC Curves.")
@@ -156,6 +171,11 @@ class FlowClassifier:
     def predict_vote_binary(self, flow_model, payload_model, flow_data, payload_data, flow_scale=0.5, payload_scale=0.5):
         final_probs = self.predict_proba_vote_binary(flow_model, payload_model, flow_data, payload_data, flow_scale, payload_scale)
         final_classes = np.argmax(final_probs, axis=1)
+        if hasattr(self, 'flow_anomaly_model') and hasattr(self, 'payload_anomaly_model') and hasattr(self, 'unknown_id'):
+            flow_anomaly = self.flow_anomaly_model.predict(flow_data)
+            payload_anomaly = self.payload_anomaly_model.predict(payload_data)
+            anomaly_mask = (flow_anomaly == -1) | (payload_anomaly == -1)
+            final_classes[anomaly_mask] = self.unknown_id
         return final_classes
     
     def predict_proba_vote_multiclass(self, flow_model, payload_model, X_flow, X_payload, flow_scale=0.5, payload_scale=0.5):
@@ -171,14 +191,19 @@ class FlowClassifier:
     def predict_vote_multiclass(self, flow_model, payload_model, X_flow, X_payload, flow_scale=0.5, payload_scale=0.5):
         final_probs = self.predict_proba_vote_multiclass(flow_model, payload_model, X_flow, X_payload, flow_scale, payload_scale)
         final_classes = np.argmax(final_probs, axis=1)
+        if hasattr(self, 'flow_anomaly_model') and hasattr(self, 'payload_anomaly_model') and hasattr(self, 'unknown_id'):
+            flow_anomaly = self.flow_anomaly_model.predict(X_flow)
+            payload_anomaly = self.payload_anomaly_model.predict(X_payload)
+            anomaly_mask = (flow_anomaly == -1) | (payload_anomaly == -1)
+            final_classes[anomaly_mask] = self.unknown_id
         return final_classes
 
     def get_binary_scores_vote(self, flow_model, payload_model, X_flow, X_payload, y, flow_scale=0.5, payload_scale=0.5):
         y_pred = self.predict_vote_binary(flow_model, payload_model, X_flow, X_payload, flow_scale, payload_scale)
         accuracy_flow = accuracy_score(y, y_pred)
-        precision_flow = precision_score(y, y_pred)
-        recall_flow = recall_score(y, y_pred)
-        f1_flow = f1_score(y, y_pred)
+        precision_flow = precision_score(y, y_pred, average='weighted', zero_division=0.0)
+        recall_flow = recall_score(y, y_pred, average='weighted', zero_division=0.0)
+        f1_flow = f1_score(y, y_pred, average='weighted', zero_division=0.0)
         metrics = {
             "Accuracy": accuracy_flow,
             "Precision": precision_flow,
@@ -194,7 +219,7 @@ class FlowClassifier:
 
     def save_binary_scores_vote(self, flow_model, payload_model, X_flow, X_payload, y, class_dict, flow_scale=0.5, payload_scale=0.5):
         y_pred = self.predict_vote_binary(flow_model, payload_model, X_flow, X_payload, flow_scale, payload_scale)
-        precision, recall, f1, support = precision_recall_fscore_support(y, y_pred)
+        precision, recall, f1, support = precision_recall_fscore_support(y, y_pred, labels=list(class_dict.keys()), zero_division=0.0)
         weighted_avg_precision = precision_score(y, y_pred, average='weighted', zero_division=0.0)
         weighted_avg_recall = recall_score(y, y_pred, average='weighted', zero_division=0.0)
         weighted_avg_f1 = f1_score(y, y_pred, average='weighted', zero_division=0.0)
@@ -261,7 +286,7 @@ class FlowClassifier:
         y_test_numeric = encoder.transform(y_test_original)
         y_pred_numeric = encoder.transform(y_pred_original)
         cm = confusion_matrix(y_test_numeric, y_pred_numeric)
-        codes = ['A', 'B'] # Create a list of alphabets for tick labels
+        codes = [chr(65 + i) for i in range(len(encoder.classes_))]
         label_legend = [(alpha, label) for alpha, label in zip(codes, encoder.classes_)]
         display_labels = [alpha for alpha, _ in label_legend]
         cm_display = ConfusionMatrixDisplay(cm, display_labels=display_labels)
@@ -381,12 +406,7 @@ class FlowClassifier:
         y_test_numeric = encoder.transform(y_test_original)
         y_pred_numeric = encoder.transform(y_pred_original)
         cm = confusion_matrix(y_test_numeric, y_pred_numeric)
-        if self.protocol=='tcp':
-            codes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'] # Create a list of alphabets for tick labels
-        elif self.protocol=='udp':
-            codes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'] # Create a list of alphabets for tick labels
-        else:
-            print("Unknown protocol. Exiting.")
+        codes = [chr(65 + i) for i in range(len(encoder.classes_))]
         label_legend = [(alpha, label) for alpha, label in zip(codes, encoder.classes_)]
         display_labels = [alpha for alpha, _ in label_legend]
         cm_display = ConfusionMatrixDisplay(cm, display_labels=display_labels)
